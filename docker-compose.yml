@@ -1,0 +1,36 @@
+# Levanta PostgreSQL + la API.   docker compose up --build
+# Requiere un archivo .env con SECRET_KEY y CREDENTIALS_KEY (ver .env.example).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: afterkey
+      POSTGRES_PASSWORD: afterkey
+      POSTGRES_DB: afterkey
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Los scripts DDL se ejecutan automáticamente la primera vez que se crea el volumen
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U afterkey -d afterkey"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql://afterkey:afterkey@db:5432/afterkey
+      SECRET_KEY: ${SECRET_KEY:?Defina SECRET_KEY en .env}
+      CREDENTIALS_KEY: ${CREDENTIALS_KEY:?Defina CREDENTIALS_KEY en .env}
+      MAIL_BACKEND: ${MAIL_BACKEND:-console}
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:

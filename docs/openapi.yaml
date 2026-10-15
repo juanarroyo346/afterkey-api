@@ -1,0 +1,968 @@
+openapi: 3.0.3
+info:
+  title: AfterKey API
+  version: 1.0.0
+  description: |
+    API REST de **AfterKey**, plataforma de gestión de herencia digital.
+
+    Permite a una persona registrar sus cuentas y servicios digitales, designar
+    responsables, definir qué hacer con cada activo tras su fallecimiento y,
+    cuando el fallecimiento es verificado, notificar automáticamente a las empresas.
+
+    **Autenticación**
+    * *Titulares y administradores*: `POST /auth/login` y enviar `Authorization: Bearer <token>`.
+    * *Responsables (beneficiarios)*: no tienen cuenta; usan las cabeceras
+      `X-Beneficiary-Email` y `X-Access-Code` (el código se entrega una sola vez
+      al crear el responsable).
+    * Los administradores que consultan datos de un titular deben añadir `?id_usuario=<id>`.
+
+    **Convenciones**
+    * Las actualizaciones (`PUT`) son parciales: los campos omitidos no se modifican.
+    * Los listados se paginan con `limit` (1-200, por defecto 50) y `offset`.
+    * Todos los errores usan el formato `{"error": {"codigo", "mensaje", "detalles"}}`.
+servers:
+  - url: http://localhost:8000
+    description: Desarrollo local / Docker Compose
+tags:
+  - name: Autenticación
+  - name: Usuarios
+  - name: Cuentas y servicios digitales
+  - name: Responsables
+  - name: Instrucciones
+  - name: Establecimientos (maestra)
+  - name: Proceso de fallecimiento
+  - name: Notificaciones y reportes
+  - name: Sistema
+
+paths:
+  /auth/register:
+    post:
+      tags: [Autenticación]
+      summary: Registrar un nuevo usuario (RF-01)
+      description: Valida que el correo sea único y envía un correo de confirmación.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+            example: { nombre_completo: Ana Gómez, email: ana@example.com, password: Clave12345 }
+      responses:
+        '201':
+          description: Usuario creado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Usuario' } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/login:
+    post:
+      tags: [Autenticación]
+      summary: Iniciar sesión
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: ana@example.com, password: Clave12345 }
+      responses:
+        '200':
+          description: Sesión iniciada.
+          content: { application/json: { schema: { $ref: '#/components/schemas/LoginResponse' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/logout:
+    post:
+      tags: [Autenticación]
+      summary: Cerrar sesión (revoca el token actual)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Sesión cerrada.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Mensaje' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /users/me:
+    get:
+      tags: [Usuarios]
+      summary: Consultar mi información
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Datos del usuario autenticado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Usuario' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [Usuarios]
+      summary: Actualizar mi información personal
+      description: Para cambiar la contraseña envíe `password` (nueva) y `password_actual`.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UsuarioUpdate' } } }
+      responses:
+        '200':
+          description: Usuario actualizado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Usuario' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Usuarios]
+      summary: Eliminar mi cuenta
+      description: |
+        Elimina el usuario y, en cascada, sus cuentas, responsables, instrucciones y logs.
+        Requiere confirmar con la contraseña en el cuerpo.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties: { password: { type: string } }
+      responses:
+        '200':
+          description: Cuenta eliminada.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Mensaje' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /accounts:
+    get:
+      tags: [Cuentas y servicios digitales]
+      summary: Listar mis cuentas y servicios (RF-02)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: tipo, in: query, schema: { type: string, enum: [Cuenta, Archivo, Servicio] } }
+        - { name: id_establecimiento, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Página de cuentas.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PageActivos' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Cuentas y servicios digitales]
+      summary: Registrar una cuenta o servicio
+      description: |
+        `credenciales` es opcional y de **solo escritura**: se cifra antes de guardarse
+        y nunca se devuelve (la respuesta solo indica `tiene_credenciales`).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivoInput' }
+            example:
+              id_establecimiento: 1
+              tipo: Cuenta
+              nombre_activo: Cuenta de ahorros
+              notas: Cuenta principal
+      responses:
+        '201':
+          description: Cuenta creada.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Activo' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /accounts/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Cuentas y servicios digitales]
+      summary: Consultar una cuenta
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: La cuenta.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Activo' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Cuentas y servicios digitales]
+      summary: Actualizar una cuenta
+      description: 'Enviar `credenciales: null` borra las credenciales guardadas.'
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ActivoUpdate' } } }
+      responses:
+        '200':
+          description: Cuenta actualizada.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Activo' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Cuentas y servicios digitales]
+      summary: Eliminar una cuenta (y sus instrucciones)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Eliminada. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /beneficiaries:
+    get:
+      tags: [Responsables]
+      summary: Listar mis responsables (RF-03)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200':
+          description: Página de responsables.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PageBeneficiarios' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Responsables]
+      summary: Registrar un responsable
+      description: |
+        La respuesta incluye `codigo_acceso` **una sola vez**. Entréguelo al responsable:
+        con su correo y ese código podrá iniciar el proceso de fallecimiento.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BeneficiarioInput' }
+            example:
+              nombre_completo: Luis Gómez
+              email_contacto: luis@example.com
+              telefono: '+57 300 000 0000'
+              parentesco: Hermano
+      responses:
+        '201':
+          description: Responsable creado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/BeneficiarioCreado' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /beneficiaries/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Responsables]
+      summary: Consultar un responsable
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: El responsable.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Beneficiario' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Responsables]
+      summary: Actualizar información del responsable
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BeneficiarioUpdate' } } }
+      responses:
+        '200':
+          description: Responsable actualizado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Beneficiario' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Responsables]
+      summary: Eliminar un responsable
+      description: Falla con 409 si alguna instrucción lo usa.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Eliminado. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /beneficiaries/{id}/regenerate-code:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Responsables]
+      summary: Regenerar el código de acceso del responsable
+      description: Invalida el código anterior y devuelve el nuevo una sola vez.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Código regenerado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/BeneficiarioCreado' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /instructions:
+    get:
+      tags: [Instrucciones]
+      summary: Listar las instrucciones de mis cuentas (RF-04)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: id_activo, in: query, schema: { type: integer } }
+        - { name: accion, in: query, schema: { type: string, enum: [Eliminar, Transferir, Conservar] } }
+      responses:
+        '200':
+          description: Página de instrucciones.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PageInstrucciones' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Instrucciones]
+      summary: Crear una instrucción para una cuenta
+      description: |
+        `Transferir` exige `id_beneficiario`. El activo y el responsable deben ser del usuario.
+        Un mismo responsable no puede tener dos instrucciones sobre el mismo activo.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InstruccionInput' }
+            example:
+              id_activo: 1
+              id_beneficiario: 1
+              accion: Transferir
+              detalle: Transferir el saldo a mi hermano.
+      responses:
+        '201':
+          description: Instrucción creada.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Instruccion' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /instructions/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Instrucciones]
+      summary: Consultar una instrucción
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: La instrucción.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Instruccion' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Instrucciones]
+      summary: Modificar una instrucción
+      description: El activo no puede cambiarse; cree una instrucción nueva en su lugar.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/InstruccionUpdate' } } }
+      responses:
+        '200':
+          description: Instrucción actualizada.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Instruccion' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Instrucciones]
+      summary: Eliminar una instrucción
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Eliminada. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /establishments:
+    get:
+      tags: [Establecimientos (maestra)]
+      summary: Listar el catálogo de establecimientos afiliados
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: sector, in: query, schema: { type: string, enum: [Banca, RRSS, Cloud, Streaming, Seguros, Otro] } }
+        - { name: q, in: query, description: Búsqueda por nombre., schema: { type: string } }
+      responses:
+        '200':
+          description: Página de establecimientos.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PageEstablecimientos' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Establecimientos (maestra)]
+      summary: Crear un establecimiento (solo administradores)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EstablecimientoInput' }
+            example: { nombre_entidad: Bancolombia, email_soporte_legal: legal@bancolombia.example.com, sector: Banca }
+      responses:
+        '201':
+          description: Establecimiento creado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Establecimiento' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /establishments/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Establecimientos (maestra)]
+      summary: Consultar un establecimiento
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: El establecimiento.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Establecimiento' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Establecimientos (maestra)]
+      summary: Actualizar un establecimiento (solo administradores)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/EstablecimientoUpdate' } } }
+      responses:
+        '200':
+          description: Establecimiento actualizado.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Establecimiento' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Establecimientos (maestra)]
+      summary: Eliminar un establecimiento (solo administradores)
+      description: Falla con 409 si algún activo lo utiliza.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Eliminado. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /death-notification:
+    post:
+      tags: [Proceso de fallecimiento]
+      summary: Registrar / iniciar el proceso de notificación de fallecimiento (RF-05)
+      description: |
+        Lo invoca un **responsable** con `X-Beneficiary-Email` y `X-Access-Code`.
+        Crea una verificación en estado *Pendiente*; un administrador debe validarla.
+        Si una verificación anterior fue *Rechazada*, se reabre con los nuevos datos.
+      security: [{ beneficiaryEmail: [], beneficiaryCode: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReportarDefuncion' }
+            example: { certificado_ref: 'https://archivo.example.com/actas/12345.pdf' }
+      responses:
+        '201':
+          description: Verificación registrada (Pendiente).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Verificacion' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    get:
+      tags: [Proceso de fallecimiento]
+      summary: Listar verificaciones de defunción (solo administradores)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: estado, in: query, schema: { type: string, enum: [Pendiente, Aprobada, Rechazada] } }
+      responses:
+        '200':
+          description: Página de verificaciones.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/Verificacion' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /death-notification/status:
+    get:
+      tags: [Proceso de fallecimiento]
+      summary: Consultar el estado del proceso
+      description: Titular (Bearer), administrador (Bearer + `?id_usuario=`) o responsable (cabeceras).
+      security:
+        - bearerAuth: []
+        - beneficiaryEmail: []
+          beneficiaryCode: []
+      parameters: [{ $ref: '#/components/parameters/IdUsuarioAdmin' }]
+      responses:
+        '200':
+          description: Estado actual.
+          content: { application/json: { schema: { $ref: '#/components/schemas/EstadoProceso' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /death-notification/{id}/validate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    put:
+      tags: [Proceso de fallecimiento]
+      summary: Validar la autenticidad del documento (solo administradores)
+      description: |
+        Con `Aprobada` el titular pasa a *fallecido* y se envían automáticamente las
+        notificaciones a las empresas. Una verificación ya resuelta no puede cambiarse (409).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ValidarDefuncion' }
+            example: { estado_validacion: Aprobada, observaciones: Acta verificada con el registro civil. }
+      responses:
+        '200':
+          description: Verificación resuelta.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verificacion: { $ref: '#/components/schemas/Verificacion' }
+                  notificaciones:
+                    nullable: true
+                    allOf: [{ $ref: '#/components/schemas/ResumenEnvio' }]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /notifications/send:
+    post:
+      tags: [Notificaciones y reportes]
+      summary: Generar y enviar (o reintentar) solicitudes a las empresas (RF-06)
+      description: |
+        Exige que el fallecimiento esté *Aprobada* (409 en caso contrario). Omite las
+        instrucciones ya enviadas y reintenta las fallidas. Nunca incluye credenciales.
+      security:
+        - bearerAuth: []
+        - beneficiaryEmail: []
+          beneficiaryCode: []
+      parameters: [{ $ref: '#/components/parameters/IdUsuarioAdmin' }]
+      responses:
+        '200':
+          description: Resumen del envío.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ResumenEnvio' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /notifications:
+    get:
+      tags: [Notificaciones y reportes]
+      summary: Consultar el historial y estado de las notificaciones
+      security:
+        - bearerAuth: []
+        - beneficiaryEmail: []
+          beneficiaryCode: []
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { $ref: '#/components/parameters/IdUsuarioAdmin' }
+        - { name: estado, in: query, schema: { type: string, enum: [Pendiente, Enviado, Fallido] } }
+      responses:
+        '200':
+          description: Página de logs de ejecución.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PageLogs' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /reports/history:
+    get:
+      tags: [Notificaciones y reportes]
+      summary: Historial de acciones y evidencias en JSON (RF-07)
+      security:
+        - bearerAuth: []
+        - beneficiaryEmail: []
+          beneficiaryCode: []
+      parameters: [{ $ref: '#/components/parameters/IdUsuarioAdmin' }]
+      responses:
+        '200':
+          description: Historial completo.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Historial' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /reports/history.pdf:
+    get:
+      tags: [Notificaciones y reportes]
+      summary: Historial de acciones y evidencias en PDF descargable (RF-07)
+      security:
+        - bearerAuth: []
+        - beneficiaryEmail: []
+          beneficiaryCode: []
+      parameters: [{ $ref: '#/components/parameters/IdUsuarioAdmin' }]
+      responses:
+        '200':
+          description: Archivo PDF.
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Comprobar disponibilidad de la API y de la base de datos
+      responses:
+        '200':
+          description: Todo en orden.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  estado: { type: string, example: ok }
+                  base_de_datos: { type: string, example: ok }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    beneficiaryEmail:
+      type: apiKey
+      in: header
+      name: X-Beneficiary-Email
+      description: Correo del responsable (se usa junto con X-Access-Code).
+    beneficiaryCode:
+      type: apiKey
+      in: header
+      name: X-Access-Code
+      description: Código de acceso entregado al crear el responsable.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+    IdUsuarioAdmin:
+      name: id_usuario
+      in: query
+      description: Obligatorio solo cuando quien llama es administrador.
+      schema: { type: integer }
+
+  responses:
+    Unauthorized:
+      description: Falta autenticación o es inválida.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Sin permisos para esta operación.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: El recurso no existe (o no pertenece al usuario).
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Conflict:
+      description: Conflicto con el estado actual (duplicado, en uso, proceso ya resuelto...).
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    ValidationError:
+      description: Datos de entrada inválidos.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              codigo: validacion_fallida
+              mensaje: Los datos enviados no son válidos.
+              detalles: [{ campo: email, mensaje: correo electrónico inválido }]
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            codigo: { type: string, example: no_encontrado }
+            mensaje: { type: string }
+            detalles:
+              type: array
+              items:
+                type: object
+                properties:
+                  campo: { type: string }
+                  mensaje: { type: string }
+    Mensaje:
+      type: object
+      properties: { mensaje: { type: string } }
+    PageMeta:
+      type: object
+      properties:
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    RegisterRequest:
+      type: object
+      required: [nombre_completo, email, password]
+      properties:
+        nombre_completo: { type: string, maxLength: 150 }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 128, description: Debe contener letras y números. }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    LoginResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Segundos de validez., example: 3600 }
+        usuario: { $ref: '#/components/schemas/Usuario' }
+    Usuario:
+      type: object
+      properties:
+        id_usuario: { type: integer }
+        nombre_completo: { type: string }
+        email: { type: string, format: email }
+        rol: { type: string, enum: [usuario, admin] }
+        estado: { type: string, enum: [vivo, fallecido] }
+        fecha_registro: { type: string, format: date-time }
+    UsuarioUpdate:
+      type: object
+      properties:
+        nombre_completo: { type: string, maxLength: 150 }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, description: Contraseña nueva. }
+        password_actual: { type: string, description: Requerida si se envía password. }
+
+    Establecimiento:
+      type: object
+      properties:
+        id_establecimiento: { type: integer }
+        nombre_entidad: { type: string }
+        email_soporte_legal: { type: string, format: email }
+        sector: { type: string, enum: [Banca, RRSS, Cloud, Streaming, Seguros, Otro] }
+    EstablecimientoInput:
+      type: object
+      required: [nombre_entidad, email_soporte_legal, sector]
+      properties:
+        nombre_entidad: { type: string, maxLength: 150 }
+        email_soporte_legal: { type: string, format: email }
+        sector: { type: string, enum: [Banca, RRSS, Cloud, Streaming, Seguros, Otro] }
+    EstablecimientoUpdate:
+      type: object
+      properties:
+        nombre_entidad: { type: string, maxLength: 150 }
+        email_soporte_legal: { type: string, format: email }
+        sector: { type: string, enum: [Banca, RRSS, Cloud, Streaming, Seguros, Otro] }
+    PageEstablecimientos:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/Establecimiento' } }
+
+    Activo:
+      type: object
+      properties:
+        id_activo: { type: integer }
+        id_usuario: { type: integer }
+        id_establecimiento: { type: integer }
+        establecimiento: { type: string }
+        tipo: { type: string, enum: [Cuenta, Archivo, Servicio] }
+        nombre_activo: { type: string }
+        notas: { type: string, nullable: true }
+        tiene_credenciales: { type: boolean, description: Las credenciales nunca se devuelven. }
+        fecha_creacion: { type: string, format: date-time }
+        fecha_actualizacion: { type: string, format: date-time }
+    ActivoInput:
+      type: object
+      required: [id_establecimiento, tipo, nombre_activo]
+      properties:
+        id_establecimiento: { type: integer }
+        tipo: { type: string, enum: [Cuenta, Archivo, Servicio] }
+        nombre_activo: { type: string, maxLength: 150 }
+        notas: { type: string, nullable: true, maxLength: 2000 }
+        credenciales: { type: string, nullable: true, maxLength: 2000, writeOnly: true }
+    ActivoUpdate:
+      type: object
+      properties:
+        id_establecimiento: { type: integer }
+        tipo: { type: string, enum: [Cuenta, Archivo, Servicio] }
+        nombre_activo: { type: string, maxLength: 150 }
+        notas: { type: string, nullable: true, maxLength: 2000 }
+        credenciales: { type: string, nullable: true, maxLength: 2000, writeOnly: true }
+    PageActivos:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/Activo' } }
+
+    Beneficiario:
+      type: object
+      properties:
+        id_beneficiario: { type: integer }
+        id_usuario_propietario: { type: integer }
+        nombre_completo: { type: string }
+        email_contacto: { type: string, format: email }
+        telefono: { type: string, nullable: true }
+        parentesco: { type: string, nullable: true }
+        fecha_creacion: { type: string, format: date-time }
+    BeneficiarioCreado:
+      allOf:
+        - $ref: '#/components/schemas/Beneficiario'
+        - type: object
+          properties:
+            codigo_acceso: { type: string, description: Se muestra UNA sola vez., example: AK-xxxxxxxxxxxxxxxxxxxxxxxx }
+    BeneficiarioInput:
+      type: object
+      required: [nombre_completo, email_contacto]
+      properties:
+        nombre_completo: { type: string, maxLength: 150 }
+        email_contacto: { type: string, format: email }
+        telefono: { type: string, nullable: true, maxLength: 30 }
+        parentesco: { type: string, nullable: true, maxLength: 50 }
+    BeneficiarioUpdate:
+      type: object
+      properties:
+        nombre_completo: { type: string, maxLength: 150 }
+        email_contacto: { type: string, format: email }
+        telefono: { type: string, nullable: true, maxLength: 30 }
+        parentesco: { type: string, nullable: true, maxLength: 50 }
+    PageBeneficiarios:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/Beneficiario' } }
+
+    Instruccion:
+      type: object
+      properties:
+        id_instruccion: { type: integer }
+        id_activo: { type: integer }
+        nombre_activo: { type: string }
+        establecimiento: { type: string }
+        id_beneficiario: { type: integer, nullable: true }
+        beneficiario: { type: string, nullable: true }
+        accion: { type: string, enum: [Eliminar, Transferir, Conservar] }
+        detalle: { type: string, nullable: true }
+        fecha_creacion: { type: string, format: date-time }
+    InstruccionInput:
+      type: object
+      required: [id_activo, accion]
+      properties:
+        id_activo: { type: integer }
+        id_beneficiario: { type: integer, nullable: true, description: Obligatorio si accion = Transferir. }
+        accion: { type: string, enum: [Eliminar, Transferir, Conservar] }
+        detalle: { type: string, nullable: true, maxLength: 2000 }
+    InstruccionUpdate:
+      type: object
+      properties:
+        id_beneficiario: { type: integer, nullable: true }
+        accion: { type: string, enum: [Eliminar, Transferir, Conservar] }
+        detalle: { type: string, nullable: true, maxLength: 2000 }
+    PageInstrucciones:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/Instruccion' } }
+
+    ReportarDefuncion:
+      type: object
+      required: [certificado_ref]
+      properties:
+        certificado_ref: { type: string, maxLength: 255, description: Referencia o URL del acta de defunción. }
+        observaciones: { type: string, nullable: true, maxLength: 2000 }
+    ValidarDefuncion:
+      type: object
+      required: [estado_validacion]
+      properties:
+        estado_validacion: { type: string, enum: [Aprobada, Rechazada] }
+        observaciones: { type: string, nullable: true, maxLength: 2000 }
+    Verificacion:
+      type: object
+      properties:
+        id_verificacion: { type: integer }
+        id_usuario: { type: integer }
+        id_beneficiario_reportante: { type: integer, nullable: true }
+        fecha_reporte: { type: string, format: date-time }
+        certificado_ref: { type: string }
+        estado_validacion: { type: string, enum: [Pendiente, Aprobada, Rechazada] }
+        fecha_validacion: { type: string, format: date-time, nullable: true }
+        validado_por: { type: integer, nullable: true }
+        observaciones: { type: string, nullable: true }
+    EstadoProceso:
+      type: object
+      properties:
+        id_usuario: { type: integer }
+        titular: { type: string }
+        estado_titular: { type: string, enum: [vivo, fallecido] }
+        estado_proceso: { type: string, enum: [Sin notificar, Pendiente, Aprobada, Rechazada] }
+        verificacion:
+          nullable: true
+          allOf: [{ $ref: '#/components/schemas/Verificacion' }]
+        notificaciones:
+          type: object
+          properties:
+            Pendiente: { type: integer }
+            Enviado: { type: integer }
+            Fallido: { type: integer }
+    ResumenEnvio:
+      type: object
+      properties:
+        enviadas: { type: integer }
+        fallidas: { type: integer }
+        omitidas_ya_enviadas: { type: integer }
+        activos_sin_instruccion: { type: integer }
+
+    LogEjecucion:
+      type: object
+      properties:
+        id_log: { type: integer }
+        id_instruccion: { type: integer }
+        fecha_ejecucion: { type: string, format: date-time }
+        estado: { type: string, enum: [Pendiente, Enviado, Fallido] }
+        destinatario: { type: string, nullable: true }
+        resultado_peticion: { type: string, nullable: true }
+        establecimiento: { type: string }
+        nombre_activo: { type: string }
+        accion: { type: string, enum: [Eliminar, Transferir, Conservar] }
+    PageLogs:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/LogEjecucion' } }
+    Historial:
+      type: object
+      properties:
+        generado_en: { type: string, format: date-time }
+        titular:
+          type: object
+          properties:
+            id_usuario: { type: integer }
+            nombre_completo: { type: string }
+            email: { type: string }
+            estado: { type: string }
+        verificacion:
+          nullable: true
+          allOf: [{ $ref: '#/components/schemas/Verificacion' }]
+        registros: { type: array, items: { $ref: '#/components/schemas/LogEjecucion' } }
