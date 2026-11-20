@@ -1,0 +1,8 @@
+Flask>=3.0,<4
+psycopg2-binary>=2.9
+PyJWT>=2.8
+cryptography>=42
+PyYAML>=6
+reportlab>=4
+python-dotenv>=1.0
+gunicorn>=22

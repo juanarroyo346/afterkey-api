@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "AfterKey",
+    "slug": "afterkey-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": { "resizeMode": "contain", "backgroundColor": "#F7F7F2" },
+    "ios": { "supportsTablet": true },
+    "android": { "adaptiveIcon": { "backgroundColor": "#F7F7F2" } },
+    "web": { "bundler": "metro" }
+  }
+}
