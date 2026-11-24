@@ -1,8 +1,9 @@
 """AfterKey API - fábrica de la aplicación."""
 import logging
+from urllib.parse import urlsplit
 
 import click
-from flask import Flask
+from flask import Flask, request
 
 from . import db as database
 from .config import load_config
@@ -17,6 +18,34 @@ def create_app(overrides=None):
     app.json = JSONProvider(app)
     app.json.compact = False
     logging.basicConfig(level=logging.INFO)
+
+    @app.after_request
+    def allow_local_development_origins(response):
+        origin = request.headers.get("Origin")
+        if origin and app.config["APP_ENV"] != "production":
+            try:
+                parsed_origin = urlsplit(origin)
+            except ValueError:
+                parsed_origin = None
+            if (
+                parsed_origin
+                and parsed_origin.scheme == "http"
+                and parsed_origin.hostname in {"localhost", "127.0.0.1", "::1"}
+                and not parsed_origin.username
+                and not parsed_origin.password
+                and parsed_origin.path in ("", "/")
+                and not parsed_origin.query
+                and not parsed_origin.fragment
+            ):
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Methods"] = (
+                    "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+                )
+                response.headers["Access-Control-Allow-Headers"] = (
+                    "Authorization, Content-Type"
+                )
+                response.vary.add("Origin")
+        return response
 
     database.init_app(app)
     app.extensions["mailer"] = Mailer(app)

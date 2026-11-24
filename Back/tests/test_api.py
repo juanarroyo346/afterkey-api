@@ -100,6 +100,39 @@ class DocsTests(ApiTestCase):
         spec = self.client.get("/openapi.json").get_json()
         self.assertEqual(spec["openapi"], "3.0.3")
 
+    def test_local_development_cors_preflight(self):
+        response = self.client.options(
+            "/auth/register",
+            headers={
+                "Origin": "http://localhost:8081",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        self.assertEqual(response.headers["Access-Control-Allow-Origin"], "http://localhost:8081")
+        self.assertIn("POST", response.headers["Access-Control-Allow-Methods"])
+        self.assertIn("Content-Type", response.headers["Access-Control-Allow-Headers"])
+
+        registration = self.client.post(
+            "/auth/register",
+            json={
+                "nombre_completo": "Ana Gómez",
+                "email": "ana-cors@example.com",
+                "password": PASSWORD,
+            },
+            headers={"Origin": "http://localhost:8081"},
+        )
+        self.assertEqual(registration.status_code, 201)
+        self.assertEqual(
+            registration.headers["Access-Control-Allow-Origin"], "http://localhost:8081"
+        )
+
+        rejected = self.client.options(
+            "/auth/register",
+            headers={"Origin": "https://example.com"},
+        )
+        self.assertNotIn("Access-Control-Allow-Origin", rejected.headers)
+
     def test_every_route_is_documented_and_vice_versa(self):
         with open("docs/openapi.yaml", encoding="utf-8") as fh:
             spec = yaml.safe_load(fh)
